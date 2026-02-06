@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("V2-Basic-Agent")
 
 SYSTEM_PROMPT_PATH = "prompts/v2_basic_agent.md"
 
