@@ -20,8 +20,6 @@ LLM_SERVER = OpenAI(
 )
 MODEL = os.getenv("LLM_MODEL")
 
-# TODO: finish the bash agent
-
 TOOL = [
     {
         "type": "function",
