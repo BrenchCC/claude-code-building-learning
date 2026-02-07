@@ -1,15 +1,24 @@
-# nano-claude-code - 构建 CLI Agent 的学习项目
+# nano-claude-code - Learn Claude Code
 
-这是一个用于学习如何构建类似 Claude Code 的Nano CLI Agent 的项目。包含从简单到复杂的多个 Agent 实现版本，帮助您理解 LLM Agent 的核心原理和架构。
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-## 项目目标
+一个用于学习如何构建类似 Claude Code 的 Nano CLI Agent 的项目。通过从零开始搭建，你将理解 LLM Agent 的核心原理与架构，并能独立扩展自己的 Agent。
 
-通过学习本项目，您将能够：
-- 理解 LLM Agent 的基本工作原理
-- 掌握如何构建能够执行外部命令的 CLI Agent
-- 学习如何为 Agent 添加工具调用能力
-- 了解如何实现交互式和单轮对话模式
-- 掌握系统提示（System Prompt）的设计方法
+这个仓库来自我对 Claude Code、codex 等 coding agent 产品的持续使用与复盘。过去半年在不断构建和迭代 Agent 系统的过程中，我对“什么才是真正的 AI Agent”有了新的认知。
+
+你将学到的关键能力：
+- Agent 循环：AI 编程代理背后的简单而有效的模式
+- 工具设计：让模型与真实世界交互的方式
+- 显式规划：使用约束让行为更可预测
+- 上下文管理：通过子代理隔离保持记忆干净
+- 知识注入：按需加载领域知识而非重新训练
+
+## 适合人群
+
+- 想理解 LLM Agent 基本工作原理的开发者
+- 想构建可扩展的 CLI Agent 原型的学习者
+- 对工具调用、系统提示与上下文管理感兴趣的人
 
 ## 项目结构
 
@@ -26,17 +35,17 @@
 
 ## Agent 版本演进
 
-### V1 - Bash Agent (最简单版本)
+### V1 - Bash Agent（最简单版本）
 
-**文件**：[v1_bash_agent_demo/bash_agent.py](v1_bash_agent_demo/bash_agent.py)
+文件：`v1_bash_agent_demo/bash_agent.py`
 
-**特点**：
+特点：
 - 仅支持一个工具：Bash 命令执行
-- 简单的架构，适合初学者学习
-- 支持单轮和交互式对话模式
-- 使用 OpenAI 兼容的 API
+- 架构简单，适合入门
+- 支持单轮和交互式对话
+- 使用 OpenAI 兼容 API
 
-**核心功能**：
+核心功能示意：
 ```python
 # 工具定义
 TOOL = [
@@ -49,8 +58,8 @@ TOOL = [
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
                 "required": ["command"],
-            }
-        }
+            },
+        },
     }
 ]
 
@@ -59,7 +68,6 @@ def chat(prompt: str = None, history: List = None):
     while True:
         response = LLM_SERVER.chat.completions.create(...)
         if llm_response.tool_calls:
-            # 执行工具调用
             results = []
             for tool_call in llm_response.tool_calls:
                 if tool_call.function.name == "bash":
@@ -70,17 +78,17 @@ def chat(prompt: str = None, history: List = None):
             return llm_response.content
 ```
 
-### V2 - Basic Agent (基础版本)
+### V2 - Basic Agent（基础版本）
 
-**文件**：[v2_basic_agent_demo/basic_agent.py](v2_basic_agent_demo/basic_agent.py)
+文件：`v2_basic_agent_demo/basic_agent.py`
 
-**特点**：
+特点：
 - 支持多个工具：Bash、Read File、Write File、Edit File
-- 更完整的架构，工具独立实现
-- 更好的错误处理和日志记录
+- 工具独立实现，架构更完整
+- 更好的错误处理与日志记录
 - 支持文件操作工具
 
-**新增工具**：
+新增工具示意：
 ```python
 # Read File 工具
 def read_file(file_path: str, max_lines: int = 1000) -> dict:
@@ -109,49 +117,43 @@ def edit_file(file_path: str, old_content: str, new_content: str) -> dict:
 
 ## 快速开始
 
-### 1. 环境设置
+### 1. 克隆仓库
+```bash
+git clone https://github.com/BrenchCC/claude-code-building-learning
+cd claude-code-building-learning
+```
 
-**创建 .env 文件**：
+### 2. 环境设置
+
+创建 `.env` 文件：
 ```bash
 cp .env.example .env
 ```
 
-**编辑 .env 文件**，配置您的 LLM 服务器信息：
+编辑 `.env`，配置你的 LLM 服务器信息：
 ```env
 LLM_BASE_URL=http://localhost:11434/v1  # 例如：Ollama 本地服务器
 LLM_API_KEY=ollama                     # Ollama 的 API Key 固定为 ollama
-LLM_MODEL=llama3:latest                # 您要使用的模型
+LLM_MODEL=llama3:latest                # 你要使用的模型
 ```
 
-### 2. 安装依赖
+### 3. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 运行 Agent
+### 4. 运行 Agent
 
-#### 单轮模式
-
-**V1 Bash Agent**：
+单轮模式：
 ```bash
 python v1_bash_agent_demo/bash_agent.py "列出当前目录内容"
-```
-
-**V2 Basic Agent**：
-```bash
 python v2_basic_agent_demo/basic_agent.py "读取 README.md 文件并总结内容"
 ```
 
-#### 交互式模式
-
-**V1 Bash Agent**：
+交互式模式：
 ```bash
 python v1_bash_agent_demo/bash_agent.py
-```
-
-**V2 Basic Agent**：
-```bash
 python v2_basic_agent_demo/basic_agent.py
 ```
 
@@ -181,9 +183,9 @@ while True:
 
 ### 3. 系统提示
 
-系统提示是 Agent 的"大脑"，定义了 Agent 的行为准则。
+系统提示是 Agent 的“大脑”，定义行为准则。
 
-**V1 系统提示示例**（[prompts/v1_bash_agent.md](prompts/v1_bash_agent.md)）：
+V1 系统提示示例：`prompts/v1_bash_agent.md`
 ```markdown
 You are a helpful AI programming assistant.
 
@@ -193,17 +195,16 @@ You are a helpful AI programming assistant.
 3. Verify each step works before proceeding
 ```
 
-## 扩展您的 Agent
+## 扩展你的 Agent
 
 ### 添加新工具
 
-要添加新工具，需要：
-
+需要完成三步：
 1. 在 `TOOL` 列表中添加工具定义
 2. 实现工具函数
 3. 在 `chat()` 函数中添加调用逻辑
 
-**示例：添加列出目录工具**
+示例：添加列出目录工具
 ```python
 # 1. 工具定义
 {
@@ -216,9 +217,9 @@ You are a helpful AI programming assistant.
             "properties": {
                 "dir_path": {"type": "string", "description": "Directory path to list"}
             },
-            "required": ["dir_path"]
-        }
-    }
+            "required": ["dir_path"],
+        },
+    },
 }
 
 # 2. 工具函数
@@ -233,28 +234,24 @@ elif tool_name == "list_dir":
 
 ### 改进系统提示
 
-系统提示是 Agent 行为的关键。您可以通过修改 `prompts/` 目录下的文件来：
+你可以通过修改 `prompts/` 目录下的文件来：
 - 改变 Agent 的性格
 - 添加特定领域知识
 - 改进问题解决策略
 
 ## 学习路径
 
-1. **从 V1 开始**：理解基本架构和对话循环
-2. **学习 V2**：掌握工具扩展和错误处理
-3. **尝试扩展**：添加您自己的工具
-4. **优化提示**：改进系统提示以获得更好的结果
-5. **高级功能**：
-   - 添加更多工具类型（API 调用、数据库操作等）
-   - 实现多 Agent 协作
-   - 添加记忆功能
-   - 优化工具调用的解析和执行
+1. 从 V1 开始：理解基本架构和对话循环
+2. 学习 V2：掌握工具扩展和错误处理
+3. 尝试扩展：添加你自己的工具
+4. 优化提示：改进系统提示以获得更好的结果
+5. 高级功能探索：多工具扩展、多 Agent 协作、记忆能力、工具调用校验
 
 ## 常见问题
 
 ### 1. LLM 不调用工具怎么办？
 
-- 检查系统提示是否明确说明了工具的用途
+- 检查系统提示是否明确说明工具用途
 - 确保工具描述足够详细
 - 调整用户提示，更明确地请求工具使用
 
@@ -273,21 +270,20 @@ elif tool_name == "list_dir":
 
 ## 技术栈
 
-- **Python 3.10+**：主要开发语言
-- **OpenAI API**：LLM 通信（兼容 Ollama 等本地服务器）
-- **python-dotenv**：环境变量管理
-- **颜色输出**：使用 ANSI 颜色代码提升用户体验
+- Python 3.10+
+- OpenAI API（兼容 Ollama 等本地服务器）
+- python-dotenv
+- ANSI 颜色输出
 
 ## 许可证
 
-MIT License - 详见 LICENSE 文件
+MIT License - 详见 `LICENSE`
 
 ## 下一步
 
-现在您已经了解了基础架构，尝试：
 1. 运行示例代码，观察 Agent 的行为
 2. 修改系统提示，改变 Agent 的行为方式
 3. 添加一个新工具（如 `list_dir` 或 `download_file`）
 4. 尝试不同的 LLM 模型，比较它们的表现
 
-祝您学习愉快！
+祝你学习愉快！
