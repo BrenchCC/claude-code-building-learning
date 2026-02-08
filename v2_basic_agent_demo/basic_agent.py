@@ -6,8 +6,9 @@ import subprocess
 from typing import List
 from pathlib import Path
 
-from dotenv import load_dotenv
 from openai import OpenAI
+from dotenv import load_dotenv
+
 
 logger = logging.getLogger("V2-Basic-Agent")
 
