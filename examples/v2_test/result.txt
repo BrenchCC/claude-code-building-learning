@@ -1,0 +1,5 @@
+./v3_todo_agent_demo/todo_agent.py: 13 functions
+./v2_basic_agent_demo/basic_agent.py: 7 functions
+./v1_bash_agent_demo/bash_agent.py: 3 functions
+./examples/v2_test/scan_py_funcs.py: 3 functions
+./examples/v1_test/hello.py: 1 functions

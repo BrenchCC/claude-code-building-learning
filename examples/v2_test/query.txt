@@ -1,0 +1,2 @@
+在当前工作区的examples/v2_test/下新增一个 CLI 工具 scan_py_funcs.py，它接收一个目录路径参数，递归统计其中所有 .py 文件的函数数量（按文件输出），并提供 --min-lines 过滤（只统计行数不少于该值的文件）。输出按函数数量降序。要求使用 argparse，并在每个函数上方加上简短英文 docstring。
+同时进行以当前工作区作为输入目录路径进行测试，将结果输出写入examples/v2_test/result.txt

@@ -65,7 +65,7 @@ class TodoManager:
         for item in self.items:
             line = ""
             if item["status"] == "completed":
-                line = f"- [x] {item['content']}"
+                line = f"- [✅] {item['content']}"
             elif item["status"] == "in_progress":
                 line = f"- [>] {item['content']} <- ({item['activeForm']})"
             else:
@@ -402,6 +402,31 @@ def todo_write(items: List[Dict]) -> dict:
         return {"error": str(exc)}
 
 
+def _parse_tool_args(arguments: str) -> Dict:
+    """
+    Parse tool call arguments safely.
+
+    Parameters:
+        arguments: JSON string arguments from tool call.
+    """
+    if not arguments:
+        return {}
+    try:
+        return json.loads(arguments)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(arguments, strict = False)
+        except json.JSONDecodeError:
+            cleaned = "".join(
+                ch for ch in arguments if ch >= " " or ch in "\t\n\r"
+            )
+            try:
+                return json.loads(cleaned, strict = False)
+            except json.JSONDecodeError as exc:
+                logger.error(f"Failed to parse tool arguments: {exc}")
+                return {}
+
+
 def _assistant_turns_since_todo(history: List[Dict]) -> int:
     """
     Count assistant turns since the last todo_write tool call.
@@ -485,7 +510,7 @@ def chat(prompt: str = None, history: List = None):
         results = []
         for tool_call in llm_response.tool_calls:
             tool_name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments or "{}")
+            args = _parse_tool_args(tool_call.function.arguments)
 
             if tool_name == "bash":
                 cmd = args.get("command", "")
@@ -501,6 +526,9 @@ def chat(prompt: str = None, history: List = None):
                 output = edit_file(**args)
             elif tool_name == "todo_write":
                 output = todo_write(**args)
+                if output.get("content"):
+                    print("\033[95mTodo List Updated:\033[0m")
+                    print(output["content"])
             else:
                 output = {"error": f"Unknown tool: {tool_name}"}
 
