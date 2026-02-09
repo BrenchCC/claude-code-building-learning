@@ -25,7 +25,7 @@ LLM_SERVER = OpenAI(
     api_key = os.getenv("LLM_API_KEY"),
 )
 
-TOOL = [
+TOOLS = [
     # Tool 1: Bash - The gateway to execute everything 
     # Can run any command: git, pip, python, curl, etc.
     {
@@ -240,7 +240,7 @@ def chat(prompt: str = None, history: List = None):
         response = LLM_SERVER.chat.completions.create(
             model = MODEL,
             messages = messages,
-            tools = TOOL,
+            tools = TOOLS,
             max_tokens = 8192
         )
 
