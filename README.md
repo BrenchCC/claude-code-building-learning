@@ -30,6 +30,7 @@
 ├── examples/                    # 使用示例
 ├── requirements.txt             # Python 依赖
 ├── .env.example                 # 环境变量示例
+├── v3_todo_agent_demo/          # V3 版本：引入 Todo 任务管理的进阶 Agent
 └── LICENSE                      # MIT 许可证
 ```
 
@@ -115,6 +116,29 @@ def edit_file(file_path: str, old_content: str, new_content: str) -> dict:
     return {"status": "ok"}
 ```
 
+### V3 - Todo Agent（带任务管理的进阶版本）
+
+文件：`v3_todo_agent_demo/todo_agent.py`
+
+特点：
+- 新增 `TodoWrite` 工具，要求模型在多步骤任务中显式规划
+- 强约束：最多 20 个任务项、同时只能有 1 个 `in_progress`
+- 通过 `activeForm` 实时显示正在做的动作
+- 加入软提醒机制：如果多轮未更新 Todo，会提示模型更新
+
+Todo 列表示意：
+```text
+- [ ] 收集需求
+- [>] 撰写 README 说明 <- (Writing README guidance...)
+- [✅] 读取现有代码
+(1/3 items completed)
+```
+
+适合用法：
+- 需要连续 3 步以上的复杂任务
+- 需要“可见的计划 + 可追踪的进度”
+- 想观察模型如何拆解任务并持续更新状态
+
 ## 快速开始
 
 ### 1. 克隆仓库
@@ -149,12 +173,14 @@ pip install -r requirements.txt
 ```bash
 python v1_bash_agent_demo/bash_agent.py "列出当前目录内容"
 python v2_basic_agent_demo/basic_agent.py "读取 README.md 文件并总结内容"
+python v3_todo_agent_demo/todo_agent.py "请规划并完成一个小型重构任务"
 ```
 
 交互式模式：
 ```bash
 python v1_bash_agent_demo/bash_agent.py
 python v2_basic_agent_demo/basic_agent.py
+python v3_todo_agent_demo/todo_agent.py
 ```
 
 ## 核心概念
@@ -194,6 +220,24 @@ You are a helpful AI programming assistant.
 2. Use bash to get necessary information
 3. Verify each step works before proceeding
 ```
+
+### 4. Todo 任务管理（V3）
+
+V3 引入 `TodoWrite` 工具，让模型必须“列计划、标进度”。  
+它解决了两个常见问题：
+- 模型容易一次性输出大段方案，缺少执行过程
+- 多步骤任务容易丢上下文、重复或偏离目标
+
+约束规则（由工具强制校验）：
+- 最多 20 项
+- `pending | in_progress | completed` 三种状态
+- 同一时间只允许 1 个 `in_progress`
+- 每项必须包含 `activeForm`（进行时描述）
+
+建议的使用方式：
+- 提示中明确要求“先拆分任务，再逐步执行”
+- 如果任务复杂，让模型先用 `TodoWrite` 写出计划
+- 每完成一个子任务就更新 Todo
 
 ## 扩展你的 Agent
 
@@ -243,9 +287,10 @@ elif tool_name == "list_dir":
 
 1. 从 V1 开始：理解基本架构和对话循环
 2. 学习 V2：掌握工具扩展和错误处理
-3. 尝试扩展：添加你自己的工具
-4. 优化提示：改进系统提示以获得更好的结果
-5. 高级功能探索：多工具扩展、多 Agent 协作、记忆能力、工具调用校验
+3. 尝试 V3：观察 Todo 约束如何改变模型行为
+4. 尝试扩展：添加你自己的工具
+5. 优化提示：改进系统提示以获得更好的结果
+6. 高级功能探索：多工具扩展、多 Agent 协作、记忆能力、工具调用校验
 
 ## 常见问题
 
@@ -284,6 +329,7 @@ MIT License - 详见 `LICENSE`
 1. 运行示例代码，观察 Agent 的行为
 2. 修改系统提示，改变 Agent 的行为方式
 3. 添加一个新工具（如 `list_dir` 或 `download_file`）
-4. 尝试不同的 LLM 模型，比较它们的表现
+4. 用 V3 尝试一个复杂任务，观察 Todo 机制的效果
+5. 尝试不同的 LLM 模型，比较它们的表现
 
 祝你学习愉快！
