@@ -1,28 +1,27 @@
 # v1: Bash 就是一切
 
-**终极简化：~50 行代码，1 个工具，Agent 能力像“搭积木”一样自然长出来。**
+**终极简化：~50 行代码，1 个工具，也能跑出完整 Agent 闭环。**
 
-在构建 v1、v2、v3 之后，一个问题浮现：Agent 的*本质*到底是什么？
-
-v1 通过反向思考来回答——像削铅笔一样，一层层削掉装饰，直到只剩下最锋利的芯。
+基于 `v2_basic_agent_demo` 可以看得更清楚：Agent 的本质不是“工具数量”，而是“循环结构”。
+v2 用 4 个工具覆盖大多数开发任务；v1 再往前一步，把入口收敛到一个：`bash`。
 
 ## 核心洞察
 
-Unix 哲学：一切皆文件，一切皆可管道。Bash 是这个世界的入口，也是 Agent 的“万能开关”：你只要会开关，就能驱动一切。
+Unix 哲学里，一切皆文件，一切皆可管道。`bash` 是统一入口：
 
 | 你需要 | Bash 命令 |
 |--------|-----------|
 | 读文件 | `cat`, `head`, `grep` |
 | 写文件 | `echo '...' > file` |
 | 搜索 | `find`, `grep`, `rg` |
-| 执行 | `python`, `npm`, `make` |
-| **子代理** | `python v1_bash_agent_demo/bash_agent.py "task"` |
+| 执行程序 | `python`, `npm`, `make` |
+| 调子代理 | `python v1_bash_agent_demo/bash_agent.py "task"` |
 
-最后一行是关键洞察：**通过 bash 调用自身就实现了子代理**。这就像在镜子里再放一面镜子，层层映射，层层展开。不需要 Task 工具，不需要 Agent Registry——只需要递归。
+关键点在最后一行：**通过 bash 调用自身，就有了子代理能力**。不需要额外的 registry 或调度框架，递归即可形成层级。
 
-## 关键实现（对应本仓库 v1 代码）
+## 最小 Agent 循环
 
-只保留最小循环骨架，完整实现见 `v1_bash_agent_demo/bash_agent.py`。这段骨架像“心跳”，每一次跳动都完成一次：提问、执行、反馈、再提问。
+和 v2 一样，核心仍是同一个循环：模型决策，工具执行，结果回填，再次决策。
 
 ```python
 while True:
@@ -33,91 +32,46 @@ while True:
     messages.append(results)
 ```
 
-补充说明：
+只要这段循环成立，Agent 就成立。  
+在 v1 中，`tools` 只有一个 `bash`；在 v2 中，`tools` 扩展为 `bash/read_file/write_file/edit_file`。
 
-- System Prompt 来自 `prompts/v1_bash_agent.md`，并会动态注入当前工作目录
-- 运行依赖 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 环境变量（见 `.env`）
-
-## 子代理工作原理
+## 子代理如何自然出现
 
 ```
 主代理
   └─ bash: python v1_bash_agent_demo/bash_agent.py "分析架构"
-       └─ 子代理（独立进程，全新历史）
+       └─ 子代理（独立进程，全新 history）
             ├─ bash: find . -name "*.py"
             ├─ bash: cat src/main.py
-            └─ 通过 stdout 返回摘要
+            └─ stdout 返回给父代理
 ```
 
+`subprocess` 拉起新进程时，天然获得：
+- 独立消息历史（上下文隔离）
+- 独立执行生命周期（失败不会污染父循环）
+- 文本化输出接口（stdout 直接回填为 tool result）
 
-**进程隔离 = 上下文隔离**。每个子进程像一间独立的小实验室，门一关，历史就被隔离开。
-- 子进程有自己的 `history=[]`
-- 父进程捕获 stdout 作为工具结果
-- 递归调用实现无限嵌套
+一句话：**进程隔离就是上下文隔离**。
 
-时序图（主进程 ↔ 子进程）：
+## 对照 v2：少了什么，多了什么
 
-```text
-参与者:
-User         Parent Agent (PID 1001)           OS          Subagent (PID 2002)           LLM Service
+| 维度 | v1 (bash-only) | v2 (4 tools) |
+|------|----------------|--------------|
+| 学习成本 | 最低 | 低 |
+| 可控编辑 | 依赖 shell 命令 | 原生读写/编辑 |
+| 鲁棒性 | 偏提示词约束 | 更结构化 |
+| 可解释性 | 极简、直观 | 更接近生产形态 |
 
-  |                   |                         |                  |                        |
-  |  提问: "分析架构"  |                         |                  |                        |
-  |------------------>|  chat()                 |                  |                        |
-  |                   |  LLM(...)               |                  |                        |
-  |                   |------------------------>|                  |                        |
-  |                   |  生成工具调用: bash     |                  |                        |
-  |                   |  cmd = python ...       |                  |                        |
-  |                   |  subprocess.run(...)    |                  |                        |
-  |                   |------------------------>|  spawn new proc  |                        |
-  |                   |                         |----------------->|  启动脚本 main()       |
-  |                   |                         |                  |  chat() history = []   |
-  |                   |                         |                  |  LLM(...)              |
-  |                   |                         |                  |----------------------->|
-  |                   |                         |                  |  得到行动/结果         |
-  |                   |                         |                  |  print(stdout)         |
-  |                   |                         |<-----------------|  stdout返回             |
-  |                   |  capture_output         |                  |                        |
-  |                   |  结果作为 tool_result   |                  |                        |
-  |                   |  继续对话               |                  |                        |
-  |<------------------|  最终回答               |                  |                        |
-```
+v1 不是“过时版本”，而是“最小可证明版本”：它证明 Agent 能力可以从极小规则中涌现。
 
-一句话：上下文隔离来自本地进程隔离，模型服务可以共享，但每次请求的 `messages` 由各自进程独立构建。
+## 实现位置与运行前提
 
-## v1 牺牲了什么
-
-| 特性 | v1 | v3 |
-|------|----|----|
-| 代理类型 | 无 | explore/code/plan |
-| 工具过滤 | 无 | 白名单 |
-| 进度显示 | 普通 stdout | 行内更新 |
-| 代码复杂度 | ~170 行 | ~450 行 |
-
-## v1 证明了什么
-
-**复杂能力从简单规则中涌现：**像河流由无数水滴组成，能力由无数个“简单回路”叠出来。
-
-1. **一个工具足够** — Bash 是通往一切的入口
-2. **递归 = 层级** — 自我调用实现子代理
-3. **进程 = 隔离** — 操作系统提供上下文分离
-4. **提示词 = 约束** — 指令塑造行为
-
-核心模式从未改变：就像发动机的四冲程，换了外壳，循环还在。
-
-```python
-while True:
-    response = model(messages, tools)
-    if response.stop_reason != "tool_use":
-        return response.text
-    results = execute(response.tool_calls)
-    messages.append(results)
-```
-
-其他一切——待办、子代理、权限——都是围绕这个循环的精化与装配。
+- 代码：`v1_bash_agent_demo/bash_agent.py`
+- Prompt：`prompts/v1_bash_agent.md`（会注入当前工作目录）
+- 环境变量：`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`（见 `.env`）
 
 ---
 
-**Bash 就是一切。**
+**Bash 就是一切。先让循环跑起来，再谈功能分层。**
 
 [← 返回 README](../README.md)
