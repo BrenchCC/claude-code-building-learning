@@ -1,139 +1,83 @@
-# v1: 模型即代理
+# v2: Basic Agent 多工具执行
 
-**~200 行代码，4 个工具，所有编程 Agent 的本质。**
+**~400 行代码，4 个核心工具，把 bash-only Agent 升级为可维护的文件操作代理。**
 
-Claude Code 的秘密？**没有秘密。**
+`v2_basic_agent_demo/basic_agent.py` 在 v1 循环基础上，重点升级为“结构化工具层”：
 
-剥去 CLI 外观、进度条、权限系统，剩下的出奇简单：一个让模型持续调用工具直到任务完成的循环。
+- `bash`
+- `read_file`
+- `write_file`
+- `edit_file`
 
-## 核心洞察
+模型仍然通过同一个循环工作，但现在可以直接用工具完成读写与精确编辑，不必把所有动作都塞进 shell 命令。
 
-传统助手：
-```
-用户 -> 模型 -> 文本回复
-```
+## 核心改动
 
-Agent 系统：
-```
-用户 -> 模型 -> [工具 -> 结果]* -> 回复
-                     ^_________|
-```
+相对 v1，v2 的关键收益：
 
-星号很重要。模型**反复**调用工具，直到它决定任务完成。这将聊天机器人转变为自主代理。
+- 文件操作有了专用 API（读/写/替换）
+- 路径统一按 `WORKSPACE` 解析
+- `edit_file` 会在替换前创建 `.bak` 备份
+- 保留 `bash` 作为通用兜底执行入口
 
-**核心洞察**：模型是决策者，代码只提供工具并运行循环。
+## 工具行为对齐代码
 
-## 四个核心工具
+### `bash(command)`
 
-Claude Code 有约 20 个工具，但 4 个覆盖 90% 的场景：
+- 在 `WORKSPACE` 下执行命令
+- 超时 300 秒返回 `returncode = 124`
+- 返回 `stdout`、`stderr`、`returncode`
 
-| 工具 | 用途 | 示例 |
-|------|------|------|
-| `bash` | 运行命令 | `npm install`, `git status` |
-| `read_file` | 读取内容 | 查看 `src/index.ts` |
-| `write_file` | 创建/覆盖 | 创建 `README.md` |
-| `edit_file` | 精确修改 | 替换一个函数 |
+### `read_file(file_path, max_lines = 1000)`
 
-有了这 4 个工具，模型可以：
-- 探索代码库（`bash: find, grep, ls`）
-- 理解代码（`read_file`）
-- 做出修改（`write_file`, `edit_file`）
-- 运行任何东西（`bash: python, npm, make`）
+- 支持相对路径与绝对路径
+- 默认最多读取 1000 行
+- 返回 `{"content": ...}`
 
-## Agent 循环
+### `write_file(file_path, content)`
 
-整个 Agent 在一个函数里：
+- 自动创建父目录
+- 直接覆盖写入
+- 返回 `{"status": "ok"}`
 
-```python
-def agent_loop(messages):
-    while True:
-        # 1. 询问模型
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM,
-            messages=messages, tools=TOOLS
-        )
+### `edit_file(file_path, old_content, new_content)`
 
-        # 2. 打印文本输出
-        for block in response.content:
-            if hasattr(block, "text"):
-                print(block.text)
+- 若找不到 `old_content`，返回 `{"status": "not_found"}`
+- 命中后先写入备份 `*.bak`
+- 完成替换后返回 `{"status": "ok", "backup_path": ...}`
 
-        # 3. 如果没有工具调用，完成
-        if response.stop_reason != "tool_use":
-            return messages
+## 对话循环
 
-        # 4. 执行工具，继续循环
-        results = []
-        for tc in response.tool_calls:
-            output = execute_tool(tc.name, tc.input)
-            results.append({"type": "tool_result", "tool_use_id": tc.id, "content": output})
+v2 仍是标准 Agent loop：
 
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": results})
-```
+1. 组装 `messages`（系统提示 + 历史）
+2. 请求模型并附带 `TOOLS`
+3. 若模型返回工具调用，执行后将 tool result 追加到 `history`
+4. 若无工具调用，输出最终文本
 
-**为什么这能工作：**
-1. 模型控制循环（持续调用工具直到 `stop_reason != "tool_use"`）
-2. 结果成为上下文（作为 "user" 消息反馈）
-3. 记忆自动累积（messages 列表保存历史）
+这个循环不复杂，但已能稳定覆盖大部分“读代码 -> 改代码 -> 验证”的任务。
 
-## 系统提示词
+## CLI 模式
 
-唯一需要的"配置"：
+`basic_agent.py` 支持两种运行方式：
 
-```python
-SYSTEM = f"""You are a coding agent at {WORKDIR}.
+- 单轮：`python v2_basic_agent_demo/basic_agent.py "你的任务"`
+- 交互：`python v2_basic_agent_demo/basic_agent.py`
 
-Loop: think briefly -> use tools -> report results.
+并通过 `parse_args()` 统一参数解析。
 
-Rules:
-- Prefer tools over prose. Act, don't just explain.
-- Never invent file paths. Use ls/find first if unsure.
-- Make minimal changes. Don't over-engineer.
-- After finishing, summarize what changed."""
-```
+## 与 v3 的边界
 
-没有复杂逻辑，只有清晰的指令。
+v2 不包含 todo 追踪能力：
 
-## 为什么这个设计有效
+- 没有 `todo_write`
+- 没有任务状态约束
+- 没有 reminder 注入
 
-**1. 简单**
-没有状态机，没有规划模块，没有框架。
-
-**2. 模型负责思考**
-模型决定用哪些工具、什么顺序、何时停止。
-
-**3. 透明**
-每个工具调用可见，每个结果在对话中。
-
-**4. 可扩展**
-添加工具 = 一个函数 + 一个 JSON schema。
-
-## 缺少什么
-
-| 特性 | 为什么省略 | 添加于 |
-|------|-----------|--------|
-| 待办追踪 | 非必需 | v2 |
-| 子代理 | 复杂度 | v3 |
-| 权限 | 学习目的信任模型 | 生产版 |
-
-关键点：**核心是微小的**，其他都是精化。
-
-## 更大的图景
-
-Claude Code、Cursor Agent、Codex CLI、Devin——都共享这个模式：
-
-```python
-while not done:
-    response = model(conversation, tools)
-    results = execute(response.tool_calls)
-    conversation.append(results)
-```
-
-差异在于工具、显示、安全性。但本质始终是：**给模型工具，让它工作**。
+v3 才在 v2 工具层之上加入任务拆解与进度管理。
 
 ---
 
-**模型即代理。这就是全部秘密。**
+**v2 的本质：在不改变主循环的前提下，用结构化工具提升可控性与可维护性。**
 
-[← 返回 README](../README_zh.md) | [下一篇: v2 →](./v2-结构化规划.md)
+[← v1](./v1_bash_is_everything.md) | [返回 README](../README.md) | [v3 →](./v3_todo_agent.md)

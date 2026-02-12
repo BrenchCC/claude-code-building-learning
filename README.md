@@ -31,6 +31,7 @@
 ├── requirements.txt             # Python 依赖
 ├── .env.example                 # 环境变量示例
 ├── v3_todo_agent_demo/          # V3 版本：引入 Todo 任务管理的进阶 Agent
+├── v4_subagent_demo/            # V4 版本：支持子代理编排的多代理 Agent
 └── LICENSE                      # MIT 许可证
 ```
 
@@ -139,6 +140,22 @@ Todo 列表示意：
 - 需要“可见的计划 + 可追踪的进度”
 - 想观察模型如何拆解任务并持续更新状态
 
+### V4 - Subagent Agent（多代理协作版本）
+
+文件：`v4_subagent_demo/subagent.py`
+
+特点：
+- 新增 `Task` 工具，可按 `explore | code | plan` 三类子代理拆分复杂任务
+- 主代理与子代理使用隔离上下文，降低长任务中的上下文污染
+- 子代理支持按类型限制工具权限，减少无关调用
+- 保留并强化 `todo_write` 约束，支持主循环提醒与进度追踪
+- 增加主循环/子循环轮数上限，降低重复调用风险
+
+适合用法：
+- 需要并行/分治处理的复杂代码分析与实现任务
+- 希望把“探索、规划、编码”职责显式分离的场景
+- 想验证多代理编排在可维护性与稳定性上的收益
+
 ## 快速开始
 
 ### 1. 克隆仓库
@@ -174,6 +191,7 @@ pip install -r requirements.txt
 python v1_bash_agent_demo/bash_agent.py "列出当前目录内容"
 python v2_basic_agent_demo/basic_agent.py "读取 README.md 文件并总结内容"
 python v3_todo_agent_demo/todo_agent.py "请规划并完成一个小型重构任务"
+python v4_subagent_demo/subagent.py "请先规划，再调用子代理完成一次项目代码质量评估"
 ```
 
 交互式模式：
@@ -181,6 +199,7 @@ python v3_todo_agent_demo/todo_agent.py "请规划并完成一个小型重构任
 python v1_bash_agent_demo/bash_agent.py
 python v2_basic_agent_demo/basic_agent.py
 python v3_todo_agent_demo/todo_agent.py
+python v4_subagent_demo/subagent.py
 ```
 
 ## 核心概念
@@ -288,9 +307,10 @@ elif tool_name == "list_dir":
 1. 从 V1 开始：理解基本架构和对话循环
 2. 学习 V2：掌握工具扩展和错误处理
 3. 尝试 V3：观察 Todo 约束如何改变模型行为
-4. 尝试扩展：添加你自己的工具
-5. 优化提示：改进系统提示以获得更好的结果
-6. 高级功能探索：多工具扩展、多 Agent 协作、记忆能力、工具调用校验
+4. 尝试 V4：体验子代理任务拆分与上下文隔离
+5. 尝试扩展：添加你自己的工具
+6. 优化提示：改进系统提示以获得更好的结果
+7. 高级功能探索：多工具扩展、多 Agent 协作、记忆能力、工具调用校验
 
 ## 常见问题
 
@@ -330,6 +350,7 @@ MIT License - 详见 `LICENSE`
 2. 修改系统提示，改变 Agent 的行为方式
 3. 添加一个新工具（如 `list_dir` 或 `download_file`）
 4. 用 V3 尝试一个复杂任务，观察 Todo 机制的效果
-5. 尝试不同的 LLM 模型，比较它们的表现
+5. 用 V4 尝试一次“计划 + 子代理执行”的完整流程
+6. 尝试不同的 LLM 模型，比较它们的表现
 
 祝你学习愉快！
