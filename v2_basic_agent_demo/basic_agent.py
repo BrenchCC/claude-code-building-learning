@@ -3,11 +3,22 @@ import sys
 import json
 import logging
 import subprocess
-from typing import List
 from pathlib import Path
+from typing import Dict, List, Optional
 
 from openai import OpenAI
 from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_call import build_assistant_message, call_chat_completion
+from utils.reasoning_renderer import ReasoningRenderer
+from utils.runtime_config import RuntimeOptions, add_runtime_args, runtime_options_from_args
+from utils.session_store import SessionStore
+from utils.thinking_policy import build_thinking_params, resolve_thinking_policy
+from utils.trace_logger import TraceLogger
 
 
 logger = logging.getLogger("V2-Basic-Agent")
@@ -26,8 +37,6 @@ LLM_SERVER = OpenAI(
 )
 
 TOOLS = [
-    # Tool 1: Bash - The gateway to execute everything 
-    # Can run any command: git, pip, python, curl, etc.
     {
         "type": "function",
         "function": {
@@ -45,12 +54,9 @@ TOOLS = [
                     }
                 },
                 "required": ["command"],
-            }
-        }
+            },
+        },
     },
-    
-    # Tool 2: Read File - For understanding existing code
-    # Returns file content with optional line limit for large files
     {
         "type": "function",
         "function": {
@@ -66,15 +72,12 @@ TOOLS = [
                     "max_lines": {
                         "type": "integer",
                         "description": "The maximum number of lines to return (default is 1000).",
-                    }
+                    },
                 },
                 "required": ["file_path"],
-            }
-        }
+            },
+        },
     },
-
-    # Tool 3: Write File - For modifying code or creating new files
-    # Takes file path and content to write, creates file and parent directories automatically if not exist
     {
         "type": "function",
         "function": {
@@ -93,12 +96,9 @@ TOOLS = [
                     },
                 },
                 "required": ["file_path", "content"],
-            }
-        }
+            },
+        },
     },
-
-    # Tool 4: Edit File - For modifying existing files with context
-    # Uses unified diff format to specify edits, takes file path and diff content(old/next), applies changes to the file (creates backup before editing)
     {
         "type": "function",
         "function": {
@@ -111,23 +111,24 @@ TOOLS = [
                         "type": "string",
                         "description": "The path to the file to edit.",
                     },
-                    "old_content":{
+                    "old_content": {
                         "type": "string",
                         "description": "The original content to be replaced.",
                     },
-                    "new_content":{
+                    "new_content": {
                         "type": "string",
                         "description": "The new content to replace with.",
-                    }
-                }
-            }
-        }
+                    },
+                },
+            },
+        },
     },
 ]
 
-with open(SYSTEM_PROMPT_PATH, "r", encoding = "utf-8") as f:
-    SYSTEM_PROMPT = f.read()
+with open(SYSTEM_PROMPT_PATH, "r", encoding = "utf-8") as file:
+    SYSTEM_PROMPT = file.read()
 SYSTEM_PROMPT = SYSTEM_PROMPT.format(workspace = WORKSPACE)
+
 
 def bash(command: str) -> dict:
     """
@@ -216,69 +217,127 @@ def edit_file(file_path: str, old_content: str, new_content: str) -> dict:
     return {"status": "ok", "backup_path": str(backup_path)}
 
 
-def chat(prompt: str = None, history: List = None):
+def chat(
+    prompt: Optional[str] = None,
+    history: Optional[List[Dict]] = None,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    actor: str = "main",
+    interactive: bool = True,
+):
     """
     The agent to chat with LLM and execute tool calls in a loop.
 
     Args:
-        prompt (str): The user prompt to start the chat.
-        history (list, optional): The chat history for multi-turn conversation.
+        prompt: The user prompt to start the chat.
+        history: The chat history for multi-turn conversation.
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        actor: Actor label for trace/session records.
+        interactive: Whether to allow interactive reasoning expansion prompt.
     Returns:
         str: The final response from the agent.
     """
-    if not history:
+    options = runtime_options or RuntimeOptions()
+    tracer = trace_logger or TraceLogger(enabled = options.show_llm_response)
+    session = session_store or SessionStore(
+        enabled = options.save_session,
+        model = MODEL,
+        session_dir = options.session_dir,
+        runtime_options = options.as_dict(),
+    )
+    renderer = ReasoningRenderer(preview_chars = options.reasoning_preview_chars)
+    show_reasoning = options.thinking_mode != "off"
+
+    thinking_policy = resolve_thinking_policy(
+        client = LLM_SERVER,
+        model = MODEL,
+        capability_setting = options.thinking_capability,
+        param_style_setting = options.thinking_param_style,
+    )
+
+    if history is None:
         history = []
 
-    history.append({"role": "user", "content": prompt})
+    if prompt:
+        history.append({"role": "user", "content": prompt})
 
     while True:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-        ]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
 
-        response = LLM_SERVER.chat.completions.create(
+        renderer.reset_turn()
+
+        def _on_content_chunk(chunk: str) -> None:
+            if not options.stream or not chunk:
+                return
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        def _on_reasoning_chunk(chunk: str) -> None:
+            if not options.stream or not show_reasoning:
+                return
+            renderer.handle_stream_chunk(chunk)
+
+        result = call_chat_completion(
+            client = LLM_SERVER,
             model = MODEL,
             messages = messages,
             tools = TOOLS,
-            max_tokens = 8192
+            max_tokens = 8192,
+            stream = options.stream,
+            thinking_params = build_thinking_params(
+                policy = thinking_policy,
+                thinking_mode = options.thinking_mode,
+                reasoning_effort = options.reasoning_effort,
+            ),
+            on_content_chunk = _on_content_chunk,
+            on_reasoning_chunk = _on_reasoning_chunk,
         )
 
-        llm_response = response.choices[0].message
+        if options.stream and result.assistant_content:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
-        if llm_response is None:
-            raise ValueError("LLM response is None")
+        rendered_reasoning = result.assistant_reasoning if show_reasoning else ""
+        renderer.finalize_turn(
+            full_reasoning = rendered_reasoning,
+            stream_mode = options.stream,
+            allow_expand_prompt = not result.tool_calls,
+            interactive = interactive,
+        )
 
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_response.content or ""
-        }
-
-        if llm_response.tool_calls:
-            assistant_message["tool_calls"] = []
-            for tool_call in llm_response.tool_calls:
-                assistant_message["tool_calls"].append({
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments
-                    }
-                })
-
+        assistant_message = build_assistant_message(result)
         history.append(assistant_message)
 
-        if not llm_response.tool_calls:
-            return llm_response.content
+        tracer.log_turn(
+            actor = actor,
+            assistant_content = result.assistant_content,
+            tool_calls = result.tool_calls,
+            assistant_reasoning = rendered_reasoning,
+        )
+        session.record_assistant(
+            actor = actor,
+            content = result.assistant_content,
+            reasoning = rendered_reasoning,
+            tool_calls = result.tool_calls,
+            raw_metadata = result.raw_metadata,
+        )
+
+        if not result.tool_calls:
+            return result.assistant_content
 
         results = []
-        for tool_call in llm_response.tool_calls:
-            tool_name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments or "{}")
+        for tool_call in result.tool_calls:
+            function_block = tool_call.get("function") or {}
+            tool_name = function_block.get("name")
+            args = _parse_tool_args(function_block.get("arguments", "{}"))
 
             if tool_name == "bash":
-                cmd = args.get("command", "")
-                print(f"\033[33m$ {cmd}\033[0m")
+                command = args.get("command", "")
+                print(f"\033[33m$ {command}\033[0m")
                 output = bash(**args)
                 combined = (output.get("stdout", "") or "") + (output.get("stderr", "") or "")
                 print(combined or "(empty)")
@@ -291,13 +350,37 @@ def chat(prompt: str = None, history: List = None):
             else:
                 output = {"error": f"Unknown tool: {tool_name}"}
 
-            results.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(output, ensure_ascii = False)[:50000]
-            })
+            session.record_tool(
+                actor = actor,
+                tool_name = tool_name or "unknown",
+                arguments = args,
+                output = output,
+            )
+
+            results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id"),
+                    "content": json.dumps(output, ensure_ascii = False)[:50000],
+                }
+            )
 
         history.extend(results)
+
+
+def _parse_tool_args(arguments: str) -> Dict:
+    """Parse tool call arguments safely."""
+    if not arguments:
+        return {}
+
+    try:
+        return json.loads(arguments)
+    except json.JSONDecodeError:
+        cleaned = "".join(character for character in arguments if character >= " " or character in "\t\n\r")
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return {}
 
 
 def parse_args():
@@ -313,10 +396,13 @@ def parse_args():
     parser.add_argument(
         "prompt",
         nargs = "?",
-        help = "User prompt for the agent"
+        help = "User prompt for the agent",
     )
+    add_runtime_args(parser)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.runtime_options = runtime_options_from_args(args)
+    return args
 
 
 def main():
@@ -324,11 +410,20 @@ def main():
     Main function to run the basic agent from command line.
     """
     args = parse_args()
+    runtime_options = args.runtime_options
 
     logging.basicConfig(
         level = logging.INFO,
         format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers = [logging.StreamHandler()]
+        handlers = [logging.StreamHandler()],
+    )
+
+    tracer = TraceLogger(enabled = runtime_options.show_llm_response, logger = logger)
+    session = SessionStore(
+        enabled = runtime_options.save_session,
+        model = MODEL,
+        session_dir = runtime_options.session_dir,
+        runtime_options = runtime_options.as_dict(),
     )
 
     if args.prompt:
@@ -337,13 +432,20 @@ def main():
         logger.info("=" * 80)
 
         try:
-            result = chat(args.prompt)
+            result = chat(
+                prompt = args.prompt,
+                runtime_options = runtime_options,
+                trace_logger = tracer,
+                session_store = session,
+                interactive = sys.stdin.isatty(),
+            )
             logger.info("-" * 60)
             logger.info("Final Response:")
             logger.info("-" * 60)
-            print(result)
-        except Exception as e:
-            logger.error(f"Error: {e}")
+            if not runtime_options.stream:
+                print(result)
+        except Exception as exc:
+            logger.error(f"Error: {exc}")
             return 1
     else:
         logger.info("=" * 80)
@@ -363,16 +465,27 @@ def main():
                 if not prompt:
                     continue
 
-                result = chat(prompt, history)
-                print(f"\033[92mAssistant:\033[0m {result}")
+                result = chat(
+                    prompt = prompt,
+                    history = history,
+                    runtime_options = runtime_options,
+                    trace_logger = tracer,
+                    session_store = session,
+                    interactive = True,
+                )
+                if not runtime_options.stream:
+                    print(f"\033[92mAssistant:\033[0m {result}")
         except KeyboardInterrupt:
             logger.info("\nConversation interrupted.")
-        except Exception as e:
-            logger.error(f"Error: {e}")
+        except Exception as exc:
+            logger.error(f"Error: {exc}")
             return 1
+
+    if session.get_path():
+        logger.info(f"Session saved: {session.get_path()}")
+
+    return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
-    

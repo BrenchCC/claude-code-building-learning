@@ -7,8 +7,19 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from openai import OpenAI
 from dotenv import load_dotenv
+from openai import OpenAI
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_call import build_assistant_message, call_chat_completion
+from utils.reasoning_renderer import ReasoningRenderer
+from utils.runtime_config import RuntimeOptions, add_runtime_args, runtime_options_from_args
+from utils.session_store import SessionStore
+from utils.thinking_policy import ThinkingPolicyState, build_thinking_params, resolve_thinking_policy
+from utils.trace_logger import TraceLogger
 
 logger = logging.getLogger("V4-Subagent")
 
@@ -427,7 +438,15 @@ def _assistant_turns_since_todo(history: List[Dict]) -> int:
     return turns
 
 
-def _safe_call_tool(tool_name: str, args: Dict) -> Tuple[Dict, Optional[str]]:
+def _safe_call_tool(
+    tool_name: str,
+    args: Dict,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    thinking_policy: Optional[ThinkingPolicyState] = None,
+    interactive: bool = True,
+) -> Tuple[Dict, Optional[str]]:
     """
     Execute a tool call with exception protection.
 
@@ -436,14 +455,33 @@ def _safe_call_tool(tool_name: str, args: Dict) -> Tuple[Dict, Optional[str]]:
         args: Parsed tool argument dict.
     """
     try:
-        return _execute_tool_call(tool_name = tool_name, args = args), None
+        return (
+            _execute_tool_call(
+                tool_name = tool_name,
+                args = args,
+                runtime_options = runtime_options,
+                trace_logger = trace_logger,
+                session_store = session_store,
+                thinking_policy = thinking_policy,
+                interactive = interactive,
+            ),
+            None,
+        )
     except TypeError as exc:
         return {}, f"Tool '{tool_name}' argument error: {exc}"
     except Exception as exc:
         return {}, f"Tool '{tool_name}' runtime error: {exc}"
 
 
-def run_task(description: str, prompt: str, agent_type: str) -> str:
+def run_task(
+    description: str,
+    prompt: str,
+    agent_type: str,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    thinking_policy: Optional[ThinkingPolicyState] = None,
+) -> str:
     """
     Spawn and run a subagent in isolated context.
 
@@ -451,10 +489,32 @@ def run_task(description: str, prompt: str, agent_type: str) -> str:
         description: Human-readable subtask description.
         prompt: Prompt sent to the subagent.
         agent_type: Subagent type key (explore|code|plan).
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        thinking_policy: Resolved thinking policy shared with parent loop.
     """
     config = AGENT_TYPE_REGISTRY.get(agent_type)
     if not config:
         return f"Error: Unknown agent type '{agent_type}'"
+
+    options = runtime_options or RuntimeOptions()
+    tracer = trace_logger or TraceLogger(enabled = options.show_llm_response)
+    session = session_store or SessionStore(
+        enabled = options.save_session,
+        model = MODEL,
+        session_dir = options.session_dir,
+        runtime_options = options.as_dict(),
+    )
+    policy = thinking_policy or resolve_thinking_policy(
+        client = LLM_SERVER,
+        model = MODEL,
+        capability_setting = options.thinking_capability,
+        param_style_setting = options.thinking_param_style,
+    )
+    renderer = ReasoningRenderer(preview_chars = options.reasoning_preview_chars)
+    show_reasoning = options.thinking_mode != "off"
+    sub_actor = f"subagent:{agent_type}"
 
     sub_tools = get_tool_for_agent(agent_type)
     sub_messages = [{"role": "user", "content": prompt}]
@@ -470,44 +530,83 @@ def run_task(description: str, prompt: str, agent_type: str) -> str:
     tool_count = 0
 
     for _ in range(MAX_SUBAGENT_ROUNDS):
-        response = LLM_SERVER.chat.completions.create(
+        renderer.reset_turn()
+
+        def _on_content_chunk(chunk: str) -> None:
+            if not options.stream or not chunk:
+                return
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        def _on_reasoning_chunk(chunk: str) -> None:
+            if not options.stream or not show_reasoning:
+                return
+            renderer.handle_stream_chunk(chunk)
+
+        result = call_chat_completion(
+            client = LLM_SERVER,
             model = MODEL,
             messages = [{"role": "system", "content": sub_system_prompt}] + sub_messages,
             tools = sub_tools,
             max_tokens = 8192,
+            stream = options.stream,
+            thinking_params = build_thinking_params(
+                policy = policy,
+                thinking_mode = options.thinking_mode,
+                reasoning_effort = options.reasoning_effort,
+            ),
+            on_content_chunk = _on_content_chunk,
+            on_reasoning_chunk = _on_reasoning_chunk,
         )
-        llm_response = response.choices[0].message
 
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_response.content or "",
-        }
-        if llm_response.tool_calls:
-            assistant_message["tool_calls"] = []
-            for tool_call in llm_response.tool_calls:
-                assistant_message["tool_calls"].append(
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                )
+        if options.stream and result.assistant_content:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
+        rendered_reasoning = result.assistant_reasoning if show_reasoning else ""
+        renderer.finalize_turn(
+            full_reasoning = rendered_reasoning,
+            stream_mode = options.stream,
+            allow_expand_prompt = False,
+            interactive = False,
+        )
+
+        assistant_message = build_assistant_message(result)
         sub_messages.append(assistant_message)
 
-        if not llm_response.tool_calls:
+        tracer.log_turn(
+            actor = sub_actor,
+            assistant_content = result.assistant_content,
+            tool_calls = result.tool_calls,
+            assistant_reasoning = rendered_reasoning,
+        )
+        session.record_assistant(
+            actor = sub_actor,
+            content = result.assistant_content,
+            reasoning = rendered_reasoning,
+            tool_calls = result.tool_calls,
+            raw_metadata = result.raw_metadata,
+        )
+
+        if not result.tool_calls:
             elapsed = time.time() - start_time
             print(f"  [{agent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)")
-            return llm_response.content or "(subagent returned no text)"
+            return result.assistant_content or "(subagent returned no text)"
 
         tool_results = []
-        for tool_call in llm_response.tool_calls:
-            tool_name = tool_call.function.name
-            args = _parse_tool_args(tool_call.function.arguments)
-            output, error = _safe_call_tool(tool_name = tool_name, args = args)
+        for tool_call in result.tool_calls:
+            function_block = tool_call.get("function") or {}
+            tool_name = function_block.get("name")
+            args = _parse_tool_args(function_block.get("arguments"))
+            output, error = _safe_call_tool(
+                tool_name = tool_name,
+                args = args,
+                runtime_options = options,
+                trace_logger = tracer,
+                session_store = session,
+                thinking_policy = policy,
+                interactive = False,
+            )
             if error:
                 output = {"error": error}
 
@@ -518,10 +617,17 @@ def run_task(description: str, prompt: str, agent_type: str) -> str:
             )
             sys.stdout.flush()
 
+            session.record_tool(
+                actor = sub_actor,
+                tool_name = tool_name or "unknown",
+                arguments = args,
+                output = output,
+            )
+
             tool_results.append(
                 {
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tool_call.get("id"),
                     "content": json.dumps(output, ensure_ascii = False)[:50000],
                 }
             )
@@ -534,7 +640,15 @@ def run_task(description: str, prompt: str, agent_type: str) -> str:
     )
 
 
-def _execute_tool_call(tool_name: str, args: Dict) -> Dict:
+def _execute_tool_call(
+    tool_name: str,
+    args: Dict,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    thinking_policy: Optional[ThinkingPolicyState] = None,
+    interactive: bool = True,
+) -> Dict:
     """
     Execute a tool by name and return a JSON-serializable dict.
 
@@ -570,20 +684,58 @@ def _execute_tool_call(tool_name: str, args: Dict) -> Dict:
             return {"error": "Task requires non-empty task_description."}
         if not agent_type:
             return {"error": "Task requires non-empty agent_type."}
-        summary = run_task(description = description, prompt = prompt, agent_type = agent_type)
+        summary = run_task(
+            description = description,
+            prompt = prompt,
+            agent_type = agent_type,
+            runtime_options = runtime_options,
+            trace_logger = trace_logger,
+            session_store = session_store,
+            thinking_policy = thinking_policy,
+        )
         return {"content": summary}
 
     return {"error": f"Unknown tool: {tool_name}"}
 
 
-def chat(prompt: Optional[str] = None, history: Optional[List[Dict]] = None) -> str:
+def chat(
+    prompt: Optional[str] = None,
+    history: Optional[List[Dict]] = None,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    actor: str = "main",
+    interactive: bool = True,
+) -> str:
     """
     Main agent loop with tool-calling and subagent orchestration.
 
     Parameters:
         prompt: User input string.
         history: Existing message history for multi-turn mode.
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        actor: Actor label for trace/session records.
+        interactive: Whether to allow interactive reasoning expansion prompt.
     """
+    options = runtime_options or RuntimeOptions()
+    tracer = trace_logger or TraceLogger(enabled = options.show_llm_response)
+    session = session_store or SessionStore(
+        enabled = options.save_session,
+        model = MODEL,
+        session_dir = options.session_dir,
+        runtime_options = options.as_dict(),
+    )
+    renderer = ReasoningRenderer(preview_chars = options.reasoning_preview_chars)
+    show_reasoning = options.thinking_mode != "off"
+    thinking_policy = resolve_thinking_policy(
+        client = LLM_SERVER,
+        model = MODEL,
+        capability_setting = options.thinking_capability,
+        param_style_setting = options.thinking_param_style,
+    )
+
     if history is None:
         history = []
     if prompt:
@@ -599,48 +751,94 @@ def chat(prompt: Optional[str] = None, history: Optional[List[Dict]] = None) -> 
 
         messages.extend(history)
 
-        response = LLM_SERVER.chat.completions.create(
+        renderer.reset_turn()
+
+        def _on_content_chunk(chunk: str) -> None:
+            if not options.stream or not chunk:
+                return
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        def _on_reasoning_chunk(chunk: str) -> None:
+            if not options.stream or not show_reasoning:
+                return
+            renderer.handle_stream_chunk(chunk)
+
+        result = call_chat_completion(
+            client = LLM_SERVER,
             model = MODEL,
             messages = messages,
             tools = TOOLS,
             max_tokens = 8192,
+            stream = options.stream,
+            thinking_params = build_thinking_params(
+                policy = thinking_policy,
+                thinking_mode = options.thinking_mode,
+                reasoning_effort = options.reasoning_effort,
+            ),
+            on_content_chunk = _on_content_chunk,
+            on_reasoning_chunk = _on_reasoning_chunk,
         )
-        llm_response = response.choices[0].message
 
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_response.content or "",
-        }
-        if llm_response.tool_calls:
-            assistant_message["tool_calls"] = []
-            for tool_call in llm_response.tool_calls:
-                assistant_message["tool_calls"].append(
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                )
+        if options.stream and result.assistant_content:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        rendered_reasoning = result.assistant_reasoning if show_reasoning else ""
+        renderer.finalize_turn(
+            full_reasoning = rendered_reasoning,
+            stream_mode = options.stream,
+            allow_expand_prompt = not result.tool_calls,
+            interactive = interactive,
+        )
+
+        assistant_message = build_assistant_message(result)
 
         history.append(assistant_message)
 
-        if not llm_response.tool_calls:
-            return llm_response.content or ""
+        tracer.log_turn(
+            actor = actor,
+            assistant_content = result.assistant_content,
+            tool_calls = result.tool_calls,
+            assistant_reasoning = rendered_reasoning,
+        )
+        session.record_assistant(
+            actor = actor,
+            content = result.assistant_content,
+            reasoning = rendered_reasoning,
+            tool_calls = result.tool_calls,
+            raw_metadata = result.raw_metadata,
+        )
+
+        if not result.tool_calls:
+            return result.assistant_content or ""
 
         tool_results = []
-        for tool_call in llm_response.tool_calls:
-            tool_name = tool_call.function.name
-            args = _parse_tool_args(tool_call.function.arguments)
-            output, error = _safe_call_tool(tool_name = tool_name, args = args)
+        for tool_call in result.tool_calls:
+            function_block = tool_call.get("function") or {}
+            tool_name = function_block.get("name")
+            args = _parse_tool_args(function_block.get("arguments"))
+            output, error = _safe_call_tool(
+                tool_name = tool_name,
+                args = args,
+                runtime_options = options,
+                trace_logger = tracer,
+                session_store = session,
+                thinking_policy = thinking_policy,
+                interactive = interactive,
+            )
             if error:
                 output = {"error": error}
+            session.record_tool(
+                actor = actor,
+                tool_name = tool_name or "unknown",
+                arguments = args,
+                output = output,
+            )
             tool_results.append(
                 {
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tool_call.get("id"),
                     "content": json.dumps(output, ensure_ascii = False)[:50000],
                 }
             )
@@ -667,7 +865,11 @@ def parse_args():
         nargs = "?",
         help = "User prompt for single-shot mode",
     )
-    return parser.parse_args()
+    add_runtime_args(parser)
+
+    args = parser.parse_args()
+    args.runtime_options = runtime_options_from_args(args)
+    return args
 
 
 def main() -> int:
@@ -675,6 +877,7 @@ def main() -> int:
     CLI entrypoint for single-shot and interactive modes.
     """
     args = parse_args()
+    runtime_options = args.runtime_options
 
     logging.basicConfig(
         level = logging.INFO,
@@ -682,20 +885,37 @@ def main() -> int:
         handlers = [logging.StreamHandler()],
     )
 
+    tracer = TraceLogger(enabled = runtime_options.show_llm_response, logger = logger)
+    session = SessionStore(
+        enabled = runtime_options.save_session,
+        model = MODEL,
+        session_dir = runtime_options.session_dir,
+        runtime_options = runtime_options.as_dict(),
+    )
+
     if args.prompt:
         logger.info("=" * 80)
         logger.info("Starting Subagent Demo in single-shot mode")
         logger.info("=" * 80)
         try:
-            result = chat(prompt = args.prompt)
+            result = chat(
+                prompt = args.prompt,
+                runtime_options = runtime_options,
+                trace_logger = tracer,
+                session_store = session,
+                interactive = sys.stdin.isatty(),
+            )
             logger.info("-" * 60)
             logger.info("Final Response:")
             logger.info("-" * 60)
-            print(result)
-            return 0
+            if not runtime_options.stream:
+                print(result)
         except Exception as exc:
             logger.error(f"Error: {exc}")
             return 1
+        if session.get_path():
+            logger.info(f"Session saved: {session.get_path()}")
+        return 0
 
     logger.info("=" * 80)
     logger.info("Starting Subagent Demo in interactive mode")
@@ -712,13 +932,24 @@ def main() -> int:
                 break
             if not user_prompt:
                 continue
-            result = chat(prompt = user_prompt, history = history)
-            print(f"\033[92mAssistant:\033[0m {result}")
+            result = chat(
+                prompt = user_prompt,
+                history = history,
+                runtime_options = runtime_options,
+                trace_logger = tracer,
+                session_store = session,
+                interactive = True,
+            )
+            if not runtime_options.stream:
+                print(f"\033[92mAssistant:\033[0m {result}")
     except KeyboardInterrupt:
         logger.info("Conversation interrupted.")
     except Exception as exc:
         logger.error(f"Error: {exc}")
         return 1
+
+    if session.get_path():
+        logger.info(f"Session saved: {session.get_path()}")
 
     return 0
 

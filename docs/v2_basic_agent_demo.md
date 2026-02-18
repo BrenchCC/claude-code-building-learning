@@ -1,83 +1,54 @@
-# v2: Basic Agent 多工具执行
+# v2: 结构化文件工具（含通用运行时能力）
 
-**~400 行代码，4 个核心工具，把 bash-only Agent 升级为可维护的文件操作代理。**
+v2 在保留 bash 的同时，引入 `read_file/write_file/edit_file`。本次升级后同样支持 thinking 控制、stream/non-stream、reasoning 折叠、会话保存。
 
-`v2_basic_agent_demo/basic_agent.py` 在 v1 循环基础上，重点升级为“结构化工具层”：
+## 模拟问题
+用 `read_file` 读取 README 前 10 行并总结，不使用 bash `cat`。
 
-- `bash`
-- `read_file`
-- `write_file`
-- `edit_file`
+## 决策步骤（编号）
+1. 解析运行时配置，确定 `stream/thinking/save-session`。
+2. LLM 进行工具选择：在 `bash` 与 `read_file` 间决策。
+3. 命中约束后调用 `read_file(file_path = "README.md", max_lines = 10)`。
+4. 回填结构化读取结果，继续 LLM 总结。
+5. 输出最终总结文本。
+6. 若含 reasoning，则提示可下展查看全文。
+7. 按开关记录 trace 日志与 session JSONL。
 
-模型仍然通过同一个循环工作，但现在可以直接用工具完成读写与精确编辑，不必把所有动作都塞进 shell 命令。
+## Mermaid 全过程流程图
+```mermaid
+flowchart TD
+    A[用户输入: 读 README 前10行并总结] --> B[解析 RuntimeOptions]
+    B --> C[LLM 第1轮决策]
+    C --> D{工具分支}
+    D -->|bash/cat| E[被提示词约束回退]
+    E --> C
+    D -->|read_file| F[执行 read_file]
+    F --> G[返回结构化 content]
+    G --> H[LLM 第2轮生成总结]
+    H --> I{存在 reasoning?}
+    I -->|有| J[展示/折叠 reasoning]
+    I -->|无| K[直接输出]
+    J --> L{save-session?}
+    K --> L
+    L -->|是| M[写 sessions/*.jsonl]
+    L -->|否| N[完成]
+    M --> N
+```
 
-## 核心改动
+## 运行命令（nano-claude）
+```bash
+conda run -n nano-claude python v2_basic_agent_demo/basic_agent.py \
+  "请用 read_file 读取 README.md 前 10 行并总结，不要使用 bash cat" \
+  --show-llm-response \
+  --no-stream \
+  --thinking on \
+  --reasoning-effort medium
+```
 
-相对 v1，v2 的关键收益：
-
-- 文件操作有了专用 API（读/写/替换）
-- 路径统一按 `WORKSPACE` 解析
-- `edit_file` 会在替换前创建 `.bak` 备份
-- 保留 `bash` 作为通用兜底执行入口
-
-## 工具行为对齐代码
-
-### `bash(command)`
-
-- 在 `WORKSPACE` 下执行命令
-- 超时 300 秒返回 `returncode = 124`
-- 返回 `stdout`、`stderr`、`returncode`
-
-### `read_file(file_path, max_lines = 1000)`
-
-- 支持相对路径与绝对路径
-- 默认最多读取 1000 行
-- 返回 `{"content": ...}`
-
-### `write_file(file_path, content)`
-
-- 自动创建父目录
-- 直接覆盖写入
-- 返回 `{"status": "ok"}`
-
-### `edit_file(file_path, old_content, new_content)`
-
-- 若找不到 `old_content`，返回 `{"status": "not_found"}`
-- 命中后先写入备份 `*.bak`
-- 完成替换后返回 `{"status": "ok", "backup_path": ...}`
-
-## 对话循环
-
-v2 仍是标准 Agent loop：
-
-1. 组装 `messages`（系统提示 + 历史）
-2. 请求模型并附带 `TOOLS`
-3. 若模型返回工具调用，执行后将 tool result 追加到 `history`
-4. 若无工具调用，输出最终文本
-
-这个循环不复杂，但已能稳定覆盖大部分“读代码 -> 改代码 -> 验证”的任务。
-
-## CLI 模式
-
-`basic_agent.py` 支持两种运行方式：
-
-- 单轮：`python v2_basic_agent_demo/basic_agent.py "你的任务"`
-- 交互：`python v2_basic_agent_demo/basic_agent.py`
-
-并通过 `parse_args()` 统一参数解析。
-
-## 与 v3 的边界
-
-v2 不包含 todo 追踪能力：
-
-- 没有 `todo_write`
-- 没有任务状态约束
-- 没有 reminder 注入
-
-v3 才在 v2 工具层之上加入任务拆解与进度管理。
-
----
-
-**v2 的本质：在不改变主循环的前提下，用结构化工具提升可控性与可维护性。**
+## 一次真实输出摘录（简短）
+```text
+Tool: read_file(file_path="README.md", max_lines=10)
+Summary: 该项目通过 v1-v5 逐步展示从 bash-only 到 skills 注入的 agent 演进路径。
+```
 
 [← v1](./v1_bash_is_everything.md) | [返回 README](../README.md) | [v3 →](./v3_todo_agent.md)

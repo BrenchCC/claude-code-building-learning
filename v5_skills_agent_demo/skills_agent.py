@@ -1,82 +1,3 @@
-#!/usr/bin/env python3
-"""
-v5_skills_agent.py - Mini Claude Code: Skills Mechanism (~550 lines)
-
-Core Philosophy: "Knowledge Externalization"
-============================================
-v3 gave us subagents for task decomposition. But there's a deeper question:
-
-    How does the model know HOW to handle domain-specific tasks?
-
-- Processing PDFs? It needs to know pdftotext vs PyMuPDF
-- Building MCP servers? It needs protocol specs and best practices
-- Code review? It needs a systematic checklist
-
-This knowledge isn't a tool - it's EXPERTISE. Skills solve this by letting
-the model load domain knowledge on-demand.
-
-The Paradigm Shift: Knowledge Externalization
---------------------------------------------
-Traditional AI: Knowledge locked in model parameters
-  - To teach new skills: collect data -> train -> deploy
-  - Cost: $10K-$1M+, Timeline: Weeks
-  - Requires ML expertise, GPU clusters
-
-Skills: Knowledge stored in editable files
-  - To teach new skills: write a SKILL.md file
-  - Cost: Free, Timeline: Minutes
-  - Anyone can do it
-
-It's like attaching a hot-swappable LoRA adapter without any training!
-
-Tools vs Skills:
----------------
-    | Concept   | What it is              | Example                    |
-    |-----------|-------------------------|---------------------------|
-    | **Tool**  | What model CAN do       | bash, read_file, write    |
-    | **Skill** | How model KNOWS to do   | PDF processing, MCP dev   |
-
-Tools are capabilities. Skills are knowledge.
-
-Progressive Disclosure:
-----------------------
-    Layer 1: Metadata (always loaded)      ~100 tokens/skill
-             name + description only
-
-    Layer 2: SKILL.md body (on trigger)    ~2000 tokens
-             Detailed instructions
-
-    Layer 3: Resources (as needed)         Unlimited
-             scripts/, references/, assets/
-
-This keeps context lean while allowing arbitrary depth.
-
-SKILL.md Standard:
------------------
-    skills/
-    |-- pdf/
-    |   |-- SKILL.md          # Required: YAML frontmatter + Markdown body
-    |-- mcp-builder/
-    |   |-- SKILL.md
-    |   |-- references/       # Optional: docs, specs
-    |-- code-review/
-        |-- SKILL.md
-        |-- scripts/          # Optional: helper scripts
-
-Cache-Preserving Injection:
---------------------------
-Critical insight: Skill content goes into tool_result (user message),
-NOT system prompt. This preserves prompt cache!
-
-    Wrong: Edit system prompt each time (cache invalidated, 20-50x cost)
-    Right: Append skill as tool result (prefix unchanged, cache hit)
-
-This is how production Claude Code works - and why it's cost-efficient.
-
-Usage:
-    python v5_skills_agent_demo/skills_agent.py
-"""
-
 import os
 import re
 import sys
@@ -89,6 +10,17 @@ from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.llm_call import build_assistant_message, call_chat_completion
+from utils.reasoning_renderer import ReasoningRenderer
+from utils.runtime_config import RuntimeOptions, add_runtime_args, runtime_options_from_args
+from utils.session_store import SessionStore
+from utils.thinking_policy import ThinkingPolicyState, build_thinking_params, resolve_thinking_policy
+from utils.trace_logger import TraceLogger
 
 logger = logging.getLogger("V5-Subagent")
 
@@ -730,7 +662,12 @@ def _assistant_turns_since_todo(history: List[Dict]) -> int:
 def _execute_tool_call(
     tool_name: str,
     args: Dict,
-    skills_used: Optional[List[str]] = None
+    skills_used: Optional[List[str]] = None,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    thinking_policy: Optional[ThinkingPolicyState] = None,
+    interactive: bool = True,
 ) -> Dict:
     """
     Execute a tool by name and return a JSON-serializable dict.
@@ -739,6 +676,11 @@ def _execute_tool_call(
         tool_name: Tool function name.
         args: Parsed tool argument dict.
         skills_used: Mutable list to record successfully loaded skill names.
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        thinking_policy: Resolved thinking policy shared with parent loop.
+        interactive: Whether to allow interactive reasoning expansion prompt.
     """
     if tool_name == "bash":
         cmd = args.get("command", "")
@@ -772,7 +714,11 @@ def _execute_tool_call(
             description = description,
             prompt = prompt,
             agent_type = agent_type,
-            skills_used = skills_used
+            skills_used = skills_used,
+            runtime_options = runtime_options,
+            trace_logger = trace_logger,
+            session_store = session_store,
+            thinking_policy = thinking_policy,
         )
         return {"content": summary}
     if tool_name == "Skill":
@@ -793,7 +739,12 @@ def _execute_tool_call(
 def _safe_call_tool(
     tool_name: str,
     args: Dict,
-    skills_used: Optional[List[str]] = None
+    skills_used: Optional[List[str]] = None,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    thinking_policy: Optional[ThinkingPolicyState] = None,
+    interactive: bool = True,
 ) -> Tuple[Dict, Optional[str]]:
     """
     Execute a tool call with exception protection.
@@ -802,13 +753,23 @@ def _safe_call_tool(
         tool_name: Tool function name.
         args: Parsed tool argument dict.
         skills_used: Mutable list to record successfully loaded skill names.
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        thinking_policy: Resolved thinking policy shared with parent loop.
+        interactive: Whether to allow interactive reasoning expansion prompt.
     """
     try:
         return (
             _execute_tool_call(
                 tool_name = tool_name,
                 args = args,
-                skills_used = skills_used
+                skills_used = skills_used,
+                runtime_options = runtime_options,
+                trace_logger = trace_logger,
+                session_store = session_store,
+                thinking_policy = thinking_policy,
+                interactive = interactive,
             ),
             None
         )
@@ -853,7 +814,11 @@ def run_task(
     description: str,
     prompt: str,
     agent_type: str,
-    skills_used: Optional[List[str]] = None
+    skills_used: Optional[List[str]] = None,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    thinking_policy: Optional[ThinkingPolicyState] = None,
 ) -> str:
     """
     Spawn and run a subagent in isolated context.
@@ -863,10 +828,32 @@ def run_task(
         prompt: Prompt sent to the subagent.
         agent_type: Subagent type key (explore|code|plan).
         skills_used: Mutable list to record successfully loaded skill names.
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        thinking_policy: Resolved thinking policy shared with parent loop.
     """
     config = AGENT_TYPE_REGISTRY.get(agent_type)
     if not config:
         return f"Error: Unknown agent type '{agent_type}'"
+
+    options = runtime_options or RuntimeOptions()
+    tracer = trace_logger or TraceLogger(enabled = options.show_llm_response)
+    session = session_store or SessionStore(
+        enabled = options.save_session,
+        model = MODEL,
+        session_dir = options.session_dir,
+        runtime_options = options.as_dict(),
+    )
+    policy = thinking_policy or resolve_thinking_policy(
+        client = LLM_SERVER,
+        model = MODEL,
+        capability_setting = options.thinking_capability,
+        param_style_setting = options.thinking_param_style,
+    )
+    renderer = ReasoningRenderer(preview_chars = options.reasoning_preview_chars)
+    show_reasoning = options.thinking_mode != "off"
+    sub_actor = f"subagent:{agent_type}"
 
     sub_tools = get_tool_for_agent(agent_type)
     sub_messages = [{"role": "user", "content": prompt}]
@@ -882,47 +869,83 @@ def run_task(
     tool_count = 0
 
     for _ in range(MAX_SUBAGENT_ROUNDS):
-        response = LLM_SERVER.chat.completions.create(
+        renderer.reset_turn()
+
+        def _on_content_chunk(chunk: str) -> None:
+            if not options.stream or not chunk:
+                return
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        def _on_reasoning_chunk(chunk: str) -> None:
+            if not options.stream or not show_reasoning:
+                return
+            renderer.handle_stream_chunk(chunk)
+
+        result = call_chat_completion(
+            client = LLM_SERVER,
             model = MODEL,
             messages = [{"role": "system", "content": sub_system_prompt}] + sub_messages,
             tools = sub_tools,
             max_tokens = 8192,
+            stream = options.stream,
+            thinking_params = build_thinking_params(
+                policy = policy,
+                thinking_mode = options.thinking_mode,
+                reasoning_effort = options.reasoning_effort,
+            ),
+            on_content_chunk = _on_content_chunk,
+            on_reasoning_chunk = _on_reasoning_chunk,
         )
-        llm_response = response.choices[0].message
 
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_response.content or "",
-        }
-        if llm_response.tool_calls:
-            assistant_message["tool_calls"] = []
-            for tool_call in llm_response.tool_calls:
-                assistant_message["tool_calls"].append(
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                )
+        if options.stream and result.assistant_content:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
+        rendered_reasoning = result.assistant_reasoning if show_reasoning else ""
+        renderer.finalize_turn(
+            full_reasoning = rendered_reasoning,
+            stream_mode = options.stream,
+            allow_expand_prompt = False,
+            interactive = False,
+        )
+
+        assistant_message = build_assistant_message(result)
         sub_messages.append(assistant_message)
 
-        if not llm_response.tool_calls:
+        tracer.log_turn(
+            actor = sub_actor,
+            assistant_content = result.assistant_content,
+            tool_calls = result.tool_calls,
+            assistant_reasoning = rendered_reasoning,
+        )
+        session.record_assistant(
+            actor = sub_actor,
+            content = result.assistant_content,
+            reasoning = rendered_reasoning,
+            tool_calls = result.tool_calls,
+            raw_metadata = result.raw_metadata,
+        )
+
+        if not result.tool_calls:
             elapsed = time.time() - start_time
             print(f"  [{agent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)")
-            return llm_response.content or "(subagent returned no text)"
+            return result.assistant_content or "(subagent returned no text)"
 
         tool_results = []
-        for tool_call in llm_response.tool_calls:
-            tool_name = tool_call.function.name
-            args = _parse_tool_args(tool_call.function.arguments)
+        for tool_call in result.tool_calls:
+            function_block = tool_call.get("function") or {}
+            tool_name = function_block.get("name")
+            args = _parse_tool_args(function_block.get("arguments"))
             output, error = _safe_call_tool(
                 tool_name = tool_name,
                 args = args,
-                skills_used = skills_used
+                skills_used = skills_used,
+                runtime_options = options,
+                trace_logger = tracer,
+                session_store = session,
+                thinking_policy = policy,
+                interactive = False,
             )
             if error:
                 output = {"error": error}
@@ -934,9 +957,16 @@ def run_task(
             )
             sys.stdout.flush()
 
+            session.record_tool(
+                actor = sub_actor,
+                tool_name = tool_name or "unknown",
+                arguments = args,
+                output = output,
+            )
+
             tool_results.append(
                 _format_tool_result(
-                    tool_call_id = tool_call.id,
+                    tool_call_id = tool_call.get("id"),
                     tool_name = tool_name,
                     output = output,
                 )
@@ -950,14 +980,44 @@ def run_task(
     )
 
 
-def chat(prompt: Optional[str] = None, history: Optional[List[Dict]] = None) -> str:
+def chat(
+    prompt: Optional[str] = None,
+    history: Optional[List[Dict]] = None,
+    runtime_options: Optional[RuntimeOptions] = None,
+    trace_logger: Optional[TraceLogger] = None,
+    session_store: Optional[SessionStore] = None,
+    actor: str = "main",
+    interactive: bool = True,
+) -> str:
     """
     Main agent loop with tool-calling and subagent orchestration.
 
     Parameters:
         prompt: User input string.
         history: Existing message history for multi-turn mode.
+        runtime_options: Runtime feature switches.
+        trace_logger: Optional per-turn trace logger.
+        session_store: Optional session persistence store.
+        actor: Actor label for trace/session records.
+        interactive: Whether to allow interactive reasoning expansion prompt.
     """
+    options = runtime_options or RuntimeOptions()
+    tracer = trace_logger or TraceLogger(enabled = options.show_llm_response)
+    session = session_store or SessionStore(
+        enabled = options.save_session,
+        model = MODEL,
+        session_dir = options.session_dir,
+        runtime_options = options.as_dict(),
+    )
+    renderer = ReasoningRenderer(preview_chars = options.reasoning_preview_chars)
+    show_reasoning = options.thinking_mode != "off"
+    thinking_policy = resolve_thinking_policy(
+        client = LLM_SERVER,
+        model = MODEL,
+        capability_setting = options.thinking_capability,
+        param_style_setting = options.thinking_param_style,
+    )
+
     if history is None:
         history = []
     if prompt:
@@ -974,52 +1034,95 @@ def chat(prompt: Optional[str] = None, history: Optional[List[Dict]] = None) -> 
 
         messages.extend(history)
 
-        response = LLM_SERVER.chat.completions.create(
+        renderer.reset_turn()
+
+        def _on_content_chunk(chunk: str) -> None:
+            if not options.stream or not chunk:
+                return
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        def _on_reasoning_chunk(chunk: str) -> None:
+            if not options.stream or not show_reasoning:
+                return
+            renderer.handle_stream_chunk(chunk)
+
+        result = call_chat_completion(
+            client = LLM_SERVER,
             model = MODEL,
             messages = messages,
             tools = TOOLS,
             max_tokens = 8192,
+            stream = options.stream,
+            thinking_params = build_thinking_params(
+                policy = thinking_policy,
+                thinking_mode = options.thinking_mode,
+                reasoning_effort = options.reasoning_effort,
+            ),
+            on_content_chunk = _on_content_chunk,
+            on_reasoning_chunk = _on_reasoning_chunk,
         )
-        llm_response = response.choices[0].message
 
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_response.content or "",
-        }
-        if llm_response.tool_calls:
-            assistant_message["tool_calls"] = []
-            for tool_call in llm_response.tool_calls:
-                assistant_message["tool_calls"].append(
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                )
+        if options.stream and result.assistant_content:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        rendered_reasoning = result.assistant_reasoning if show_reasoning else ""
+        renderer.finalize_turn(
+            full_reasoning = rendered_reasoning,
+            stream_mode = options.stream,
+            allow_expand_prompt = not result.tool_calls,
+            interactive = interactive,
+        )
+
+        assistant_message = build_assistant_message(result)
 
         history.append(assistant_message)
 
-        if not llm_response.tool_calls:
-            result = llm_response.content or ""
-            return f"{result}\n\n{_render_skill_usage_note(skills_used)}"
+        tracer.log_turn(
+            actor = actor,
+            assistant_content = result.assistant_content,
+            tool_calls = result.tool_calls,
+            assistant_reasoning = rendered_reasoning,
+        )
+        session.record_assistant(
+            actor = actor,
+            content = result.assistant_content,
+            reasoning = rendered_reasoning,
+            tool_calls = result.tool_calls,
+            raw_metadata = result.raw_metadata,
+        )
+
+        if not result.tool_calls:
+            final_text = result.assistant_content or ""
+            return f"{final_text}\n\n{_render_skill_usage_note(skills_used)}"
 
         tool_results = []
-        for tool_call in llm_response.tool_calls:
-            tool_name = tool_call.function.name
-            args = _parse_tool_args(tool_call.function.arguments)
+        for tool_call in result.tool_calls:
+            function_block = tool_call.get("function") or {}
+            tool_name = function_block.get("name")
+            args = _parse_tool_args(function_block.get("arguments"))
             output, error = _safe_call_tool(
                 tool_name = tool_name,
                 args = args,
-                skills_used = skills_used
+                skills_used = skills_used,
+                runtime_options = options,
+                trace_logger = tracer,
+                session_store = session,
+                thinking_policy = thinking_policy,
+                interactive = interactive,
             )
             if error:
                 output = {"error": error}
+            session.record_tool(
+                actor = actor,
+                tool_name = tool_name or "unknown",
+                arguments = args,
+                output = output,
+            )
             tool_results.append(
                 _format_tool_result(
-                    tool_call_id = tool_call.id,
+                    tool_call_id = tool_call.get("id"),
                     tool_name = tool_name,
                     output = output,
                 )
@@ -1051,8 +1154,11 @@ def parse_args():
         nargs = "?",
         help = "User prompt for the agent"
     )
+    add_runtime_args(parser)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.runtime_options = runtime_options_from_args(args)
+    return args
 
 
 def main():
@@ -1060,11 +1166,20 @@ def main():
     Main function to run the skills agent from command line.
     """
     args = parse_args()
+    runtime_options = args.runtime_options
 
     logging.basicConfig(
         level = logging.INFO,
         format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers = [logging.StreamHandler()]
+    )
+
+    tracer = TraceLogger(enabled = runtime_options.show_llm_response, logger = logger)
+    session = SessionStore(
+        enabled = runtime_options.save_session,
+        model = MODEL,
+        session_dir = runtime_options.session_dir,
+        runtime_options = runtime_options.as_dict(),
     )
 
     if args.prompt:
@@ -1073,13 +1188,20 @@ def main():
         logger.info("=" * 80)
 
         try:
-            result = chat(args.prompt)
+            result = chat(
+                prompt = args.prompt,
+                runtime_options = runtime_options,
+                trace_logger = tracer,
+                session_store = session,
+                interactive = sys.stdin.isatty(),
+            )
             logger.info("-" * 60)
             logger.info("Final Response:")
             logger.info("-" * 60)
-            print(result)
-        except Exception as e:
-            logger.error(f"Error: {e}")
+            if not runtime_options.stream:
+                print(result)
+        except Exception as exc:
+            logger.error(f"Error: {exc}")
             return 1
     else:
         logger.info("=" * 80)
@@ -1099,13 +1221,26 @@ def main():
                 if not prompt:
                     continue
 
-                result = chat(prompt, history)
-                print(f"\033[92mAssistant:\033[0m {result}")
+                result = chat(
+                    prompt = prompt,
+                    history = history,
+                    runtime_options = runtime_options,
+                    trace_logger = tracer,
+                    session_store = session,
+                    interactive = True,
+                )
+                if not runtime_options.stream:
+                    print(f"\033[92mAssistant:\033[0m {result}")
         except KeyboardInterrupt:
             logger.info("\nConversation interrupted.")
-        except Exception as e:
-            logger.error(f"Error: {e}")
+        except Exception as exc:
+            logger.error(f"Error: {exc}")
             return 1
+
+    if session.get_path():
+        logger.info(f"Session saved: {session.get_path()}")
+
+    return 0
 
 
 if __name__ == "__main__":
