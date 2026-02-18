@@ -9,14 +9,15 @@ Provides:
 5) Common test runner
 """
 
-import json
 import os
+import json
 import subprocess
 import traceback
 from pathlib import Path
 
-from dotenv import load_dotenv
 from openai import OpenAI
+from dotenv import load_dotenv
+
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -63,10 +64,10 @@ READ_FILE_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "limit": {"type": "integer"},
+                "file_path": {"type": "string"},
+                "max_lines": {"type": "integer"},
             },
-            "required": ["path"],
+            "required": ["file_path"],
         },
     },
 }
@@ -79,10 +80,10 @@ WRITE_FILE_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
+                "file_path": {"type": "string"},
                 "content": {"type": "string"},
             },
-            "required": ["path", "content"],
+            "required": ["file_path", "content"],
         },
     },
 }
@@ -95,11 +96,11 @@ EDIT_FILE_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "old_text": {"type": "string"},
-                "new_text": {"type": "string"},
+                "file_path": {"type": "string"},
+                "old_content": {"type": "string"},
+                "new_content": {"type": "string"},
             },
-            "required": ["path", "old_text", "new_text"],
+            "required": ["file_path", "old_content", "new_content"],
         },
     },
 }
@@ -107,7 +108,7 @@ EDIT_FILE_TOOL = {
 TODO_WRITE_TOOL = {
     "type": "function",
     "function": {
-        "name": "TodoWrite",
+        "name": "todo_write",
         "description": "Update task list with content/status/activeForm fields.",
         "parameters": {
             "type": "object",
@@ -141,10 +142,10 @@ SKILL_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "skill": {"type": "string"},
+                "skill_name": {"type": "string"},
                 "args": {"type": "string"},
             },
-            "required": ["skill"],
+            "required": ["skill_name"],
         },
     },
 }
@@ -157,14 +158,14 @@ TASK_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "description": {"type": "string"},
+                "task_description": {"type": "string"},
                 "prompt": {"type": "string"},
-                "subagent_type": {
+                "agent_type": {
                     "type": "string",
-                    "enum": ["Explore", "general-purpose", "Plan"],
+                    "enum": ["explore", "code", "plan"],
                 },
             },
-            "required": ["description", "prompt", "subagent_type"],
+            "required": ["task_description", "prompt", "agent_type"],
         },
     },
 }
@@ -231,8 +232,9 @@ def execute_tool(name, args, workdir = None):
             return f"Error: {exc}"
 
     if name == "read_file":
-        path = _resolve_path(args.get("path", ""), base_dir)
-        limit = args.get("limit")
+        raw_path = args.get("file_path", args.get("path", ""))
+        path = _resolve_path(raw_path, base_dir)
+        limit = args.get("max_lines", args.get("limit"))
         try:
             lines = path.read_text(encoding = "utf-8", errors = "replace").splitlines()
             if isinstance(limit, int):
@@ -242,7 +244,8 @@ def execute_tool(name, args, workdir = None):
             return f"Error: {exc}"
 
     if name == "write_file":
-        path = _resolve_path(args.get("path", ""), base_dir)
+        raw_path = args.get("file_path", args.get("path", ""))
+        path = _resolve_path(raw_path, base_dir)
         content = args.get("content", "")
         try:
             path.parent.mkdir(parents = True, exist_ok = True)
@@ -252,9 +255,10 @@ def execute_tool(name, args, workdir = None):
             return f"Error: {exc}"
 
     if name == "edit_file":
-        path = _resolve_path(args.get("path", ""), base_dir)
-        old_text = args.get("old_text", args.get("old_string", ""))
-        new_text = args.get("new_text", args.get("new_string", ""))
+        raw_path = args.get("file_path", args.get("path", ""))
+        path = _resolve_path(raw_path, base_dir)
+        old_text = args.get("old_content", args.get("old_text", args.get("old_string", "")))
+        new_text = args.get("new_content", args.get("new_text", args.get("new_string", "")))
         try:
             text = path.read_text(encoding = "utf-8", errors = "replace")
             if old_text not in text:
@@ -264,7 +268,7 @@ def execute_tool(name, args, workdir = None):
         except Exception as exc:
             return f"Error: {exc}"
 
-    if name == "TodoWrite":
+    if name in {"TodoWrite", "todo_write"}:
         items = args.get("items", [])
         in_progress = 0
         lines = []
@@ -280,7 +284,7 @@ def execute_tool(name, args, workdir = None):
         return "\n".join(lines) + f"\n({done}/{len(items)} done)"
 
     if name == "Skill":
-        skill_name = args.get("skill", "")
+        skill_name = args.get("skill_name", args.get("skill", ""))
         skill_args = args.get("args")
         args_attr = f' args="{skill_args}"' if skill_args else ""
         return (
@@ -292,8 +296,8 @@ def execute_tool(name, args, workdir = None):
         )
 
     if name == "Task":
-        desc = args.get("description", "")
-        agent_type = args.get("subagent_type", "")
+        desc = args.get("task_description", args.get("description", ""))
+        agent_type = args.get("agent_type", args.get("subagent_type", ""))
         return f"[{agent_type}] {desc} (simulated)"
 
     return f"Unknown tool: {name}"
