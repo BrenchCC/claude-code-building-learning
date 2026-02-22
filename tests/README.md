@@ -14,6 +14,7 @@
 - `test_v3.py`：v3（todo 状态机）测试。
 - `test_v4.py`：v4（子代理与上下文隔离）测试。
 - `test_v5.py`：v5（skill 注入）测试。
+- `test_v6.py`：v6（压缩与 Agent 类）测试。
 - `test_runtime_config.py`：CLI/ENV 优先级与解析测试。
 - `test_thinking_policy.py`：thinking 能力判定与参数重试测试。
 - `test_reasoning_renderer.py`：reasoning 预览/折叠/下展测试。
@@ -34,6 +35,7 @@ python tests/test_v2.py
 python tests/test_v3.py
 python tests/test_v4.py
 python tests/test_v5.py
+python tests/test_v6.py
 ```
 
 ## 运行前提
