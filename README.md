@@ -4,12 +4,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
 ## 项目简介
-这是一个从零学习 LLM Coding Agent 的教学仓库。核心主线是 v1-v5 五个可运行脚本：
+这是一个从零学习 LLM Coding Agent 的教学仓库。核心主线是 v1-v6 六个可运行脚本：
 - v1：bash 单工具闭环
 - v2：结构化文件工具
 - v3：todo 状态机
 - v4：子代理编排
 - v5：skill 动态注入
+- v6：上下文压缩与长会话管理
 
 本仓库还包含完整测试脚本、示例输入、以及 skills 下的辅助脚本（如 PDF 处理脚本）。
 
@@ -28,7 +29,7 @@
 │   └── skills_agent.py                    # v5 主脚本：Skill 动态注入
 ├── v6_compression_agent_demo/
 │   └── compression_agent.py               # v6 主脚本：Compression 子代理
-├── utils/                                 # v1-v5 通用运行时模块
+├── utils/                                 # v1-v6 通用运行时模块
 │   ├── runtime_config.py                  # CLI/ENV 解析与 RuntimeOptions
 │   ├── thinking_policy.py                 # thinking 能力探测与参数注入
 │   ├── llm_call.py                        # stream/non-stream 统一调用封装
@@ -43,6 +44,7 @@
 │   ├── test_v3.py                         # v3 行为/约束测试
 │   ├── test_v4.py                         # v4 子代理测试
 │   ├── test_v5.py                         # v5 skill 测试
+│   ├── test_v6.py                         # v6 压缩与 Agent 测试
 │   ├── test_runtime_config.py             # 通用配置解析测试
 │   ├── test_thinking_policy.py            # thinking 策略测试
 │   ├── test_reasoning_renderer.py         # reasoning 渲染测试
@@ -67,13 +69,17 @@
 │           └── fill_pdf_form_with_annotations.py
 ├── examples/                              # 示例输入/脚本
 │   ├── v1_v2_test/hello.py
-│   └── v3_test/scan_py_funcs.py
+│   ├── v3_test/scan_py_funcs.py
+│   ├── v4_test/query.md
+│   ├── v5_test/query.md
+│   └── v6_test/query.md
 ├── prompts/
 │   ├── v1_bash_agent.md
 │   ├── v2_basic_agent.md
 │   ├── v3_todo_agent.md
 │   ├── v4_subagent.md
-│   └── v5_skills_agent.md
+│   ├── v5_skills_agent.md
+│   └── v6_compression_agent.md
 ├── docs/                                  # 指导解析文档
 ├── requirements.txt
 └── .env.example
@@ -87,6 +93,7 @@
 | `v3_todo_agent_demo/todo_agent.py` | 引入 `todo_write`，显式规划与状态追踪 | 多步骤任务、有进度要求 |
 | `v4_subagent_demo/subagent.py` | 引入 `Task`，支持 explore/plan/code 角色分工 | 复杂任务拆解与上下文隔离 |
 | `v5_skills_agent_demo/skills_agent.py` | 引入 `Skill`，按需加载领域知识 | 需要领域知识（PDF/MCP/评审） |
+| `v6_compression_agent_demo/compression_agent.py` | 引入 ContextManager 压缩与 Agent 类 | 长对话与上下文控制 |
 
 ## 快速开始
 ### 1) 创建并激活 Conda 环境
@@ -118,8 +125,8 @@ LLM_MODEL=llama3:latest
 python <script.py> <args>
 ```
 
-## v1-v5 通用运行时功能（已统一）
-以下参数在 v1-v5 均可用：
+## v1-v6 通用运行时功能（已统一）
+以下参数在 v1-v6 均可用：
 - `--show-llm-response / --no-show-llm-response`
 - `--stream / --no-stream`
 - `--thinking {auto,on,off}`
@@ -169,6 +176,7 @@ python <script.py> <args>
 | `v3_todo_agent_demo/todo_agent.py` | v2 + `todo_write` | 多步骤任务拆解与进度追踪 | `python v3_todo_agent_demo/todo_agent.py "先规划两步再执行"` |
 | `v4_subagent_demo/subagent.py` | v3 + `Task` 子代理 | explore/plan/code 角色分工 | `python v4_subagent_demo/subagent.py "调用 explore 分析项目"` |
 | `v5_skills_agent_demo/skills_agent.py` | v4 + `Skill` 动态注入 | 任务按需加载领域知识 | `python v5_skills_agent_demo/skills_agent.py "加载 code-review skill 检查脚本"` |
+| `v6_compression_agent_demo/compression_agent.py` | v5 + 压缩与状态化 Agent | 长对话、上下文压缩与恢复 | `python v6_compression_agent_demo/compression_agent.py "解释压缩策略并给示例"` |
 
 ## 每个主脚本可展示的“功能使用”示例
 ### v1: bash 单工具 + 流式 + 会话保存
@@ -206,6 +214,13 @@ python v5_skills_agent_demo/skills_agent.py \
   --show-llm-response --save-session
 ```
 
+### v6: 压缩与长会话管理
+```bash
+python v6_compression_agent_demo/compression_agent.py \
+  "执行多步骤任务并在必要时触发压缩策略" \
+  --show-llm-response --save-session
+```
+
 ## 测试脚本总览与用法
 ### 新增通用能力测试
 | 脚本 | 覆盖点 | 命令 |
@@ -223,6 +238,7 @@ python v5_skills_agent_demo/skills_agent.py \
 | `tests/test_v3.py` | todo 约束与状态流转 |
 | `tests/test_v4.py` | 子代理类型与上下文隔离 |
 | `tests/test_v5.py` | skill 加载与注入机制 |
+| `tests/test_v6.py` | 压缩策略与 Agent 行为 |
 
 运行示例：
 ```bash
@@ -231,20 +247,22 @@ python tests/test_v3.py
 
 
 ## docs 指导解析（每部分讲解什么）
-- `docs/quickstart.md`：快速启动路径与最小可运行步骤。
-- `docs/v1_bash_is_everything.md`：讲解 v1 的最小 Agent 闭环与 bash 决策流程。
-- `docs/v2_basic_agent_demo.md`：讲解结构化文件工具如何替代纯 bash 文件操作。
-- `docs/v3_todo_agent.md`：讲解 todo 状态机、约束校验、状态迁移。
-- `docs/v4_subagent.md`：讲解主代理与子代理分工、上下文隔离、任务回传。
-- `docs/v5_skills_agent.md`：讲解 Skill 触发、注入路径与后续工具执行。
+- [快速起步指南](docs/quickstart.md)：快速启动路径与最小可运行步骤。
+- [v1：bash 闭环与决策流程](docs/v1_bash_is_everything.md)：讲解 v1 的最小 Agent 闭环与 bash 决策流程。
+- [v2：结构化文件工具实践](docs/v2_basic_agent_demo.md)：讲解结构化文件工具如何替代纯 bash 文件操作。
+- [v3：todo 状态机与约束](docs/v3_todo_agent.md)：讲解 todo 状态机、约束校验、状态迁移。
+- [v4：子代理编排与隔离](docs/v4_subagent.md)：讲解主代理与子代理分工、上下文隔离、任务回传。
+- [v5：Skill 注入机制](docs/v5_skills_agent.md)：讲解 Skill 触发、注入路径与后续工具执行。
+- [v6：上下文压缩与恢复](docs/v6_context_compression.md)：讲解上下文压缩策略与恢复机制。
 
 ## 文档导航
-- `docs/quickstart.md`
-- `docs/v1_bash_is_everything.md`
-- `docs/v2_basic_agent_demo.md`
-- `docs/v3_todo_agent.md`
-- `docs/v4_subagent.md`
-- `docs/v5_skills_agent.md`
+- [快速起步指南](docs/quickstart.md)
+- [v1：bash 闭环与决策流程](docs/v1_bash_is_everything.md)
+- [v2：结构化文件工具实践](docs/v2_basic_agent_demo.md)
+- [v3：todo 状态机与约束](docs/v3_todo_agent.md)
+- [v4：子代理编排与隔离](docs/v4_subagent.md)
+- [v5：Skill 注入机制](docs/v5_skills_agent.md)
+- [v6：上下文压缩与恢复](docs/v6_context_compression.md)
 
 ## 常见问题
 ### 1) 连不上模型服务
