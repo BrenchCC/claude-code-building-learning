@@ -40,7 +40,8 @@ LLM_SERVER = OpenAI(
 
 # Micro-compact savings threshold: only clear old tool results if estimated
 # savings >= this value.
-MIN_SAVINGS = 20000
+MIN_SAVINGS = 8000
+AUTO_COMPACT_BUFFER = 40000
 MAX_RESTORE_FILES = 5
 MAX_RESTORE_TOKENS_PER_FILE = 5000
 MAX_RESTORE_TOKENS_TOTAL = 50000
@@ -48,10 +49,10 @@ IMAGE_TOKEN_ESTIMATE = 2000
 
 # Context window management
 def auto_compact_threshold(context_window: int = 200000, max_output: int = 16384) -> int:
-    """Dynamic threshold: context_window - min(max_output, 20000) - 13000.
-    For a 200K window with 16K output: 200000 - 16384 - 13000 = 170616."""
+    """Dynamic threshold: context_window - min(max_output, 20000) - AUTO_COMPACT_BUFFER.
+    For a 200K window with 16K output: 200000 - 16384 - 40000 = 143616."""
     output_reserve = min(max_output, 20000)
-    return context_window - output_reserve - 13000
+    return context_window - output_reserve - AUTO_COMPACT_BUFFER
 
 class ContextManager:
     """

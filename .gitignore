@@ -213,5 +213,6 @@ __marimo__/
 # Code Agent
 AGENTS.md
 CLAUDE.md
+.claude
 .omc
 .omx
