@@ -40,8 +40,8 @@ LLM_SERVER = OpenAI(
 
 # Micro-compact savings threshold: only clear old tool results if estimated
 # savings >= this value.
-MIN_SAVINGS = 8000
-AUTO_COMPACT_BUFFER = 40000
+MIN_SAVINGS = 2000  
+AUTO_COMPACT_BUFFER = 10000  
 MAX_RESTORE_FILES = 5
 MAX_RESTORE_TOKENS_PER_FILE = 5000
 MAX_RESTORE_TOKENS_TOTAL = 50000
